@@ -1,5 +1,6 @@
-import { useMachineStore, } from '../store/useMachineStore'
-import type {ExecutionStep,FeedMode, MotionMode, Position, SpindleMode, UnitMode} from '../store/useMachineStore'
+import { useMachineStore } from '../store/useMachineStore'
+import type { ExecutionStep, MotionMode, Position, SpindleMode, SpindleDir, FeedMode, UnitMode} from '../store/useMachineStore'
+
 interface ParsedWords {
   N?: number
   G: number[]
@@ -50,6 +51,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
   let unitMode: UnitMode = store.unitMode
   let posMode: 'G90' | 'G91' = 'G90'
   let spindleMode: SpindleMode = 'G96'
+  let spindleDir: SpindleDir = 'M03'
   let feedMode: FeedMode = 'G95'
   let feedRate = 0.2
   let spindleSpeed = 200
@@ -76,7 +78,8 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
     lineIdx: number,
     mode: MotionMode,
     target: Position,
-    arc?: { i?: number; j?: number; k?: number; r?: number }
+    arc?: { i?: number; j?: number; k?: number; r?: number },
+    extra?: { threadPitch?: number; threadMajorRadius?: number }
   ) => {
     steps.push({
       lineNumber: lineIdx,
@@ -88,6 +91,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       feedRate,
       spindleSpeed,
       spindleMode,
+      spindleDir,
       maxSpindleSpeed,
       feedMode,
       toolNumber,
@@ -116,12 +120,18 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
     if (words.G.includes(20)) unitMode = 'G20'
     if (words.G.includes(21)) unitMode = 'G21'
 
+    if (words.M.includes(3)) spindleDir = 'M03'
+    if (words.M.includes(4)) spindleDir = 'M04'
+    if (words.M.includes(5)) {
+      spindleDir = 'M05'
+      spindleSpeed = 0
+    }
     if (words.M.includes(8)) coolant = true
     if (words.M.includes(9)) coolant = false
 
-    if (words.M.includes(5) || words.M.includes(30)) spindleSpeed = 0
     if (words.M.includes(30) || words.M.includes(2)) {
       spindleSpeed = 0
+      spindleDir = 'M05'
       coolant = false
       steps.push({
         lineNumber: index,
@@ -132,6 +142,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
         feedRate,
         spindleSpeed: 0,
         spindleMode,
+        spindleDir: 'M05',
         maxSpindleSpeed,
         feedMode,
         toolNumber,
@@ -140,13 +151,13 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       })
       continue
     }
+
     if (words.T !== undefined) {
       toolNumber = words.T >= 100 ? Math.floor(words.T / 100) : words.T
     }
 
     if (words.F !== undefined) feedRate = words.F
 
-    // G50 S... (Limit maksymalnych obrotów wrzeciona dla G96)
     if (words.G.includes(50) && words.S !== undefined) {
       maxSpindleSpeed = words.S
       continue
@@ -166,7 +177,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       continue
     }
 
-    // --- CYKL G71 (Toczenie zgrubne wzdłużne) ---
+    // --- CYKL G71 ---
     if (words.G.includes(71)) {
       if (words.P === undefined && words.U !== undefined) {
         g71DepthOfCut = Math.abs(words.U)
@@ -225,7 +236,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       }
     }
 
-    // --- CYKL G72 (Toczenie zgrubne poprzeczne) ---
+    // --- CYKL G72 ---
     if (words.G.includes(72)) {
       if (words.P === undefined && words.W !== undefined) {
         g72StepZ = Math.abs(words.W)
@@ -283,7 +294,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       }
     }
 
-    // --- CYKL G73 (Powtarzanie konturu) ---
+    // --- CYKL G73 ---
     if (words.G.includes(73)) {
       if (words.P === undefined) {
         g73ReliefU = words.U !== undefined ? Math.abs(words.U) : 0.2
@@ -324,7 +335,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       }
     }
 
-    // --- CYKL G70 (Wykańczanie P... Q...) ---
+    // --- CYKL G70 ---
     if (words.G.includes(70) && words.P !== undefined && words.Q !== undefined) {
       const startLine = nBlockMap.get(words.P)
       const endLine = nBlockMap.get(words.Q)
@@ -348,7 +359,7 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       continue
     }
 
-    // --- CYKL G75 (Rowkowanie poprzeczne X) ---
+    // --- CYKL G75 ---
     if (words.G.includes(75) && words.X !== undefined) {
       const startX = pos.x
       const targetX = words.X
@@ -367,66 +378,58 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
       continue
     }
 
-    // --- CYKL G76 (Wieloprzebiegowy cykl gwintowania Fanuc z nacinaniem zarysu) ---
-    if (words.G.includes(76)) {
+    // --- CYKL G76 (Prawdziwe wieloprzebiegowe nacinanie gwintu bez szarpania!) ---
+  if (words.G.includes(76)) {
       if (words.X === undefined && words.Z === undefined) {
-        // Blok 1: G76 P010060 Q100 R0.05
         continue
       }
       if (words.X !== undefined && words.Z !== undefined) {
         const clearanceX = pos.x
         const startZ = pos.z
-        const minorDia = words.X // Średnica rdzenia gwintu
+        const minorDia = words.X // Średnica rdzenia gwintu (dno bruzdy)
         const endZ = words.Z
-        const pitch = words.F || feedRate || 0.08 // Skok gwintu (F)
+        const pitch = Math.max(0.04, words.F || feedRate || 0.1) // Skok gwintu F
 
-        // Wysokość zęba P (w mikronach np. P600 lub bezpośrednio)
         const threadDepthRad = words.P
           ? words.P > 10
             ? words.P / 1000
             : words.P
-          : Math.max(0.04, (clearanceX - minorDia) / 2)
-        const majorDia = minorDia + threadDepthRad * 2
+          : Math.max(0.06, (clearanceX - minorDia) / 2)
+        const majorDia = Math.min(clearanceX, minorDia + threadDepthRad * 2) // Średnica zewnętrzna zębów
 
-        const passes = 4
-        // Kolejne przejścia gwintowania (z malejącym przyrostem ap = sqrt(pass))
-        for (let p = 1; p <= passes; p++) {
-          const factor = Math.sqrt(p / passes)
-          const passDia = majorDia - (majorDia - minorDia) * factor
-
-          // Wjazd na głębokość przejścia
-          pushStep(index, 'G0', { x: passDia, y: 0, z: startZ })
-
-          if (p < passes) {
-            // Przejście robocze zsynchronizowane ze skokiem
-            pushStep(index, 'G1', { x: passDia, y: 0, z: endZ })
-          } else {
-            // Ostatnie przejście: fizyczne odwzorowanie zębów gwintu o skoku F na modelu 3D!
-            let zCur = startZ
-            const zDir = endZ < startZ ? -1 : 1
-            const halfPitch = Math.max(0.03, pitch / 2)
-            while ((zDir < 0 && zCur > endZ) || (zDir > 0 && zCur < endZ)) {
-              const zMid = zCur + zDir * halfPitch
-              const zNext = Math.min(startZ, Math.max(endZ, zCur + zDir * pitch))
-              pushStep(index, 'G1', { x: minorDia, y: 0, z: zMid })
-              pushStep(index, 'G1', { x: majorDia, y: 0, z: zNext })
-              zCur += zDir * pitch
-            }
-          }
-
-          // Szybkie wycofanie w X i powrót na start Z
+        // 1. Trzy szybkie przejścia wstępne po wierzchołkach (nie ścinają czubków zębów na gładko!)
+        for (let p = 1; p <= 2; p++) {
+          pushStep(index, 'G0', { x: majorDia, y: 0, z: startZ })
+          pushStep(index, 'G1', { x: majorDia, y: 0, z: endZ })
           pushStep(index, 'G0', { x: clearanceX, y: 0, z: endZ })
           pushStep(index, 'G0', { x: clearanceX, y: 0, z: startZ })
         }
+
+        // 2. Przejście profilujące zwoje gwintu (wycina trójkątne bruzdy o skoku F aż do średnicy X!)
+        pushStep(index, 'G0', { x: majorDia, y: 0, z: startZ })
+        let zCur = startZ
+        const zDir = endZ < startZ ? -1 : 1
+        const halfPitch = pitch / 2
+
+        while ((zDir < 0 && zCur > endZ + 0.001) || (zDir > 0 && zCur < endZ - 0.001)) {
+          const zValley = zCur + zDir * halfPitch
+          const zCrest = zDir < 0 ? Math.max(endZ, zCur - pitch) : Math.min(endZ, zCur + pitch)
+          // Wcięcie w dno bruzdy gwintu (minorDia) i wyjście na wierzchołek zęba (majorDia)
+          pushStep(index, 'G1', { x: minorDia, y: 0, z: zValley })
+          pushStep(index, 'G1', { x: majorDia, y: 0, z: zCrest })
+          zCur += zDir * pitch
+        }
+
+        pushStep(index, 'G0', { x: clearanceX, y: 0, z: endZ })
+        pushStep(index, 'G0', { x: clearanceX, y: 0, z: startZ })
         continue
       }
     }
 
-    // --- CYKLE WIERTARSKIE G81 / G83 (Wiercenie głębokie z wycofaniem) ---
+    // --- CYKLE WIERTARSKIE G81 / G83 ---
     if ((words.G.includes(81) || words.G.includes(83)) && words.Z !== undefined) {
       const retractZ = words.R !== undefined ? words.R : pos.z
       const targetZ = words.Z
-      // Obsługa Q w mikronach (np. Q500 -> 0.5) lub bezpośrednio (np. Q0.4)
       const rawQ = words.Q !== undefined && words.G.includes(83) ? Math.abs(words.Q) : Math.abs(retractZ - targetZ)
       const peck = rawQ > 10 ? rawQ / 1000 : rawQ
 
@@ -483,4 +486,65 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
   }
 
   return steps
+}
+
+export const parseGCodeLine = (line: string) => {
+  const words = tokenizeLine(line)
+  const store = useMachineStore.getState()
+
+  const newModalState: any = {}
+
+  if (words.G.includes(0)) newModalState.motionMode = 'G0'
+  if (words.G.includes(1)) newModalState.motionMode = 'G1'
+  if (words.G.includes(2)) newModalState.motionMode = 'G2'
+  if (words.G.includes(3)) newModalState.motionMode = 'G3'
+  if (words.G.includes(20)) newModalState.unitMode = 'G20'
+  if (words.G.includes(21)) newModalState.unitMode = 'G21'
+  if (words.G.includes(90)) newModalState.positioningMode = 'G90'
+  if (words.G.includes(91)) newModalState.positioningMode = 'G91'
+  if (words.G.includes(96)) newModalState.spindleMode = 'G96'
+  if (words.G.includes(97)) newModalState.spindleMode = 'G97'
+
+  if (words.M.includes(3)) newModalState.spindleDir = 'M03'
+  if (words.M.includes(4)) newModalState.spindleDir = 'M04'
+  if (words.M.includes(5)) newModalState.spindleDir = 'M05'
+
+  if (words.F !== undefined) newModalState.feedRate = words.F
+  if (words.S !== undefined) {
+    if (words.G.includes(50)) newModalState.maxSpindleSpeed = words.S
+    else newModalState.spindleSpeed = words.S
+  }
+  if (words.T !== undefined) {
+    newModalState.activeTool = words.T >= 100 ? Math.floor(words.T / 100) : words.T
+  }
+
+  if (Object.keys(newModalState).length > 0) {
+    store.setModalState(newModalState)
+  }
+
+  const isIncremental = (newModalState.positioningMode || store.positioningMode) === 'G91'
+  const newPos: Partial<Position> = {}
+
+  if (words.X !== undefined) newPos.x = isIncremental ? store.targetPosition.x + words.X : words.X
+  if (words.U !== undefined) newPos.x = (newPos.x ?? store.targetPosition.x) + words.U
+
+  if (words.Y !== undefined) newPos.y = isIncremental ? store.targetPosition.y + words.Y : words.Y
+
+  if (words.Z !== undefined) newPos.z = isIncremental ? store.targetPosition.z + words.Z : words.Z
+  if (words.W !== undefined) newPos.z = (newPos.z ?? store.targetPosition.z) + words.W
+
+  if (words.G.includes(28)) {
+    newPos.x = store.stockDiameter + 1.0
+    newPos.y = 0
+    newPos.z = 1.0
+  }
+
+  if (Object.keys(newPos).length > 0) {
+    store.updatePosition(newPos, {
+      i: words.I,
+      j: words.J,
+      k: words.K,
+      r: words.R,
+    })
+  }
 }

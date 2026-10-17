@@ -78,7 +78,6 @@ export function LatheTool() {
   const spindleSpeed = useMachineStore((state) => state.spindleSpeed)
   const motionMode = useMachineStore((state) => state.motionMode)
   const carveLatheProfile = useMachineStore((state) => state.carveLatheProfile)
-
   const isPlaying = useMachineStore((state) => state.isPlaying)
   const compiledSteps = useMachineStore((state) => state.compiledSteps)
   const currentStepIndex = useMachineStore((state) => state.currentStepIndex)
@@ -116,7 +115,9 @@ export function LatheTool() {
       if (step.motionMode === 'G0') {
         rapidPts.push(new THREE.Vector3(curZ, curR, 0.02))
         rapidPts.push(new THREE.Vector3(nextZ, nextR, 0.02))
-      } else if (step.motionMode === 'G1') {
+      } 
+      
+      else if (step.motionMode === 'G1') {
         cutPts.push(new THREE.Vector3(curZ, curR, 0.03))
         cutPts.push(new THREE.Vector3(nextZ, nextR, 0.03))
       } else if (step.motionMode === 'G2' || step.motionMode === 'G3') {
@@ -200,6 +201,12 @@ export function LatheTool() {
     let isMoving = false
 
     if (motionMode === 'G0' || motionMode === 'G1' || !motionMode) {
+      carveLatheProfile(
+          currentVec.x,
+          currentVec.y,
+          lastPos.current.x,
+          lastPos.current.y,
+        )
       if (distance > 0.0001) {
         isMoving = true
         const step = Math.min(speed * delta, distance)

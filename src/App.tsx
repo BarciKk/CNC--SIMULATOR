@@ -28,8 +28,8 @@ export default function App() {
               <LatheWorkpiece />
             </>
           )}
-
-          <Grid
+         <Grid
+            position={[0, -2.8, 0]}
             infiniteGrid
             fadeDistance={25}
             sectionColor="#555"

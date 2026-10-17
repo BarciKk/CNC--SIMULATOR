@@ -5,8 +5,31 @@ export type MotionMode = 'G0' | 'G1' | 'G2' | 'G3'
 export type PositioningMode = 'G90' | 'G91'
 export type UnitMode = 'G20' | 'G21'
 export type SpindleMode = 'G96' | 'G97'
+export type SpindleDir = 'M03' | 'M04' | 'M05'
 export type FeedMode = 'G94' | 'G95'
 export type WorkpieceViewMode = 'solid' | 'transparent' | 'section'
+
+export type ToolGeometryType =
+  | 'DCLNR'   // Zgrubny zewnętrzny 95° (CNMG 80°)
+  | 'SVJBR'   // Wykańczający zewnętrzny prawy (VCMT 35°)
+  | 'SVJBL'   // Wykańczający zewnętrzny lewy / reverse (VCMT 35°)
+  | 'GROOVE'  // Ucinak / listwa rowkująca w oprawce
+  | 'THREAD'  // Nóż do gwintowania zewnętrznego 60°
+  | 'SCLCR'   // Wytaczak wewnętrzny (6/8/12/16/20 mm)
+  | 'DRILL'   // Wiertło płytkowe / kręte z kątem 140°
+  | 'ENDMILL' // Frez palcowy (dla frezarki)
+
+export type BoringBarSizeMM = 6 | 8 | 12 | 16 | 20
+
+export interface ToolConfig {
+  slot: number
+  type: ToolGeometryType
+  name: string
+  diameter: number            // Średnica wiertła
+  width: number               // Szerokość płytki ucinaka (domyślnie 0.10)
+  pointAngle: number          // Kąt wierzchołkowy wiertła (140°)
+  boringBarMM: BoringBarSizeMM // Rozmiar wytaczaka: 6, 8, 12, 16 lub 20 mm
+}
 
 export interface Position {
   x: number
@@ -36,11 +59,71 @@ export interface ExecutionStep {
   feedRate: number
   spindleSpeed: number
   spindleMode: SpindleMode
+  spindleDir: SpindleDir
   maxSpindleSpeed: number
   feedMode: FeedMode
   toolNumber: number
   coolant: boolean
-  isProgramEnd?: boolean // Flaga dla M30 / M02
+  isProgramEnd?: boolean
+}
+
+const STORAGE_KEY = 'cnc_sim_light_state_v2'
+
+export const DEFAULT_TOOLS: Record<number, ToolConfig> = {
+  1: { slot: 1, type: 'DCLNR', name: 'DCLNR 2525M12 (Zgrubny 95°)', diameter: 0.5, width: 0.04, pointAngle: 80, boringBarMM: 12 },
+  2: { slot: 2, type: 'GROOVE', name: 'Listwa Ucinak 3mm (0.10")', diameter: 0.5, width: 0.10, pointAngle: 90, boringBarMM: 12 },
+  3: { slot: 3, type: 'SVJBR', name: 'SVJBR 2525M16 (Finisz 35°)', diameter: 0.5, width: 0.02, pointAngle: 35, boringBarMM: 12 },
+  4: { slot: 4, type: 'SVJBL', name: 'SVJBL 2525M16 (Reverse 35°)', diameter: 0.5, width: 0.02, pointAngle: 35, boringBarMM: 12 },
+  5: { slot: 5, type: 'THREAD', name: 'SER 2525M16 (Gwint 60°)', diameter: 0.5, width: 0.08, pointAngle: 60, boringBarMM: 12 },
+  6: { slot: 6, type: 'DRILL', name: 'Wiertło VHM 140°', diameter: 0.5, width: 0.10, pointAngle: 140, boringBarMM: 12 },
+  7: { slot: 7, type: 'SCLCR', name: 'Wytaczak S-SCLCR', diameter: 0.5, width: 0.10, pointAngle: 80, boringBarMM: 12 },
+  8: { slot: 8, type: 'ENDMILL', name: 'Frez Palcowy VHM', diameter: 0.5, width: 0.5, pointAngle: 180, boringBarMM: 12 },
+}
+
+// Domyślne, czyste parametry przy przełączeniu typu narzędzia w slocie (żeby nie zaciągało danych z wiertła!)
+export function getCleanDefaultsForType(type: ToolGeometryType): Partial<ToolConfig> {
+  switch (type) {
+    case 'DCLNR':
+      return { type, name: 'DCLNR 2525M12 (Zgrubny 95°)', width: 0.04 }
+    case 'SVJBR':
+      return { type, name: 'SVJBR 2525M16 (Finisz 35°)', width: 0.02 }
+    case 'SVJBL':
+      return { type, name: 'SVJBL 2525M16 (Reverse 35°)', width: 0.02 }
+    case 'GROOVE':
+      return { type, name: 'Listwa Ucinak (3mm / 0.10")', width: 0.10 }
+    case 'THREAD':
+      return { type, name: 'SER 2525M16 (Gwint 60°)', width: 0.06 }
+    case 'DRILL':
+      return { type, name: 'Wiertło VHM 140°', diameter: 0.5, pointAngle: 140 }
+    case 'SCLCR':
+      return { type, name: 'Wytaczak S-SCLCR', boringBarMM: 12 }
+    default:
+      return { type, name: 'Frez Palcowy VHM', diameter: 0.5 }
+  }
+}
+
+function loadSavedState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+export function saveLightState(data: {
+  gcodeText?: string
+  stockDiameter?: number
+  stockLength?: number
+  toolLibrary?: Record<number, ToolConfig>
+}) {
+  try {
+    const current = loadSavedState() || {}
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...current, ...data }))
+  } catch {
+    // Ignorujemy błędy quota
+  }
 }
 
 interface MachineState {
@@ -56,6 +139,9 @@ interface MachineState {
   stockLength: number
   setStockDimensions: (diameter: number, length: number) => void
 
+  toolLibrary: Record<number, ToolConfig>
+  updateToolConfig: (slot: number, config: Partial<ToolConfig>) => void
+
   latheProfile: number[]
   innerProfile: number[]
   carveLatheProfile: (z: number, radius: number, prevZ: number, prevR: number) => void
@@ -70,6 +156,7 @@ interface MachineState {
   positioningMode: PositioningMode
   unitMode: UnitMode
   spindleMode: SpindleMode
+  spindleDir: SpindleDir
   feedMode: FeedMode
   feedRate: number
   spindleSpeed: number
@@ -80,11 +167,12 @@ interface MachineState {
   setModalState: (state: Partial<MachineState>) => void
 
   gcodeLines: string[]
+  savedGcodeText: string
   compiledSteps: ExecutionStep[]
   currentStepIndex: number
   currentLineIndex: number
   isPlaying: boolean
-  loadProgram: (lines: string[], steps?: ExecutionStep[]) => void
+  loadProgram: (lines: string[], steps?: ExecutionStep[], rawText?: string) => void
   playProgram: () => void
   pauseProgram: () => void
   advanceStep: () => void
@@ -100,8 +188,10 @@ interface MachineState {
 }
 
 export const Z_STEPS = 600
-const DEFAULT_DIA = 2.0
-const DEFAULT_LEN = 4.0
+const saved = loadSavedState()
+const INITIAL_DIA = saved?.stockDiameter ?? 2.0
+const INITIAL_LEN = saved?.stockLength ?? 4.0
+const INITIAL_TOOLS: Record<number, ToolConfig> = saved?.toolLibrary ?? DEFAULT_TOOLS
 
 export const useMachineStore = create<MachineState>((set) => ({
   machineType: 'lathe',
@@ -112,44 +202,75 @@ export const useMachineStore = create<MachineState>((set) => ({
   showToolpath: true,
   setShowToolpath: (show) => set({ showToolpath: show }),
 
-  stockDiameter: DEFAULT_DIA,
-  stockLength: DEFAULT_LEN,
+  stockDiameter: INITIAL_DIA,
+  stockLength: INITIAL_LEN,
   setStockDimensions: (diameter, length) =>
-    set(() => ({
-      stockDiameter: diameter,
-      stockLength: length,
-      latheProfile: Array(Z_STEPS).fill(diameter / 2),
-      innerProfile: Array(Z_STEPS).fill(0),
-    })),
+    set(() => {
+      saveLightState({ stockDiameter: diameter, stockLength: length })
+      return {
+        stockDiameter: diameter,
+        stockLength: length,
+        latheProfile: Array(Z_STEPS).fill(diameter / 2),
+        innerProfile: Array(Z_STEPS).fill(0),
+      }
+    }),
 
-  latheProfile: Array(Z_STEPS).fill(DEFAULT_DIA / 2),
+  toolLibrary: INITIAL_TOOLS,
+  updateToolConfig: (slot, partial) =>
+    set((state) => {
+      const currentSlot = state.toolLibrary[slot] || DEFAULT_TOOLS[slot]
+      // Jeśli użytkownik zmienia typ narzędzia, nadpisujemy czyste wartości domyślne dla nowego typu!
+      const cleanDefaults =
+        partial.type && partial.type !== currentSlot.type
+          ? getCleanDefaultsForType(partial.type)
+          : {}
+
+      const updated = {
+        ...state.toolLibrary,
+        [slot]: { ...currentSlot, ...cleanDefaults, ...partial },
+      }
+      saveLightState({ toolLibrary: updated })
+      return { toolLibrary: updated }
+    }),
+
+  latheProfile: Array(Z_STEPS).fill(INITIAL_DIA / 2),
   innerProfile: Array(Z_STEPS).fill(0),
 
   carveLatheProfile: (z, r, prevZ, prevR) =>
     set((state) => {
       const len = state.stockLength
-      if (Math.min(prevZ, z) > 0.01 || Math.max(prevZ, z) < -len - 0.01) {
+      if (Math.min(prevZ, z) > 0.02 || Math.max(prevZ, z) < -len - 0.02) {
         return state
       }
 
+      const tool = state.toolLibrary[state.activeTool] || DEFAULT_TOOLS[1]
       const dz = z - prevZ
       const dr = r - prevR
 
-      // 1. Wewnętrzne wiercenie w osi (T0404 lub ruch po X=0)
-      if ((state.activeTool === 4 || (Math.abs(r) < 0.005 && Math.abs(prevR) < 0.005)) && z < prevZ) {
-        const minZ = Math.min(prevZ, z)
-        const maxZ = Math.max(prevZ, z)
-        const startIndex = Math.max(0, Math.floor(((minZ + len) / len) * (Z_STEPS - 1)) - 1)
-        const endIndex = Math.min(Z_STEPS - 1, Math.ceil(((maxZ + len) / len) * (Z_STEPS - 1)) + 1)
+      // 1. WIERCENIE OSIOWE Z KĄTEM WIERZCHOŁKOWYM (140°)
+      if (tool.type === 'DRILL' || (Math.abs(r) < 0.005 && Math.abs(prevR) < 0.005 && z < prevZ)) {
+        const drillRad = (tool.type === 'DRILL' ? tool.diameter : 0.5) / 2
+        const angleRad = ((tool.pointAngle || 140) * Math.PI) / 180
+        const coneLength = drillRad / Math.tan(angleRad / 2)
+
+        const tipZ = Math.min(prevZ, z)
+        const maxZ = Math.max(prevZ, z) + coneLength
+        const startIndex = Math.max(0, Math.floor(((tipZ + len) / len) * (Z_STEPS - 1)) - 2)
+        const endIndex = Math.min(Z_STEPS - 1, Math.ceil(((maxZ + len) / len) * (Z_STEPS - 1)) + 2)
 
         const newInner = [...state.innerProfile]
-        const drillRadius = 0.25 // Promień wiertła T0404 (średnica Ø0.50)
         let innerMod = false
+
         for (let i = startIndex; i <= endIndex; i++) {
           const pointZ = -len + (i / (Z_STEPS - 1)) * len
-          if (pointZ >= minZ - 0.005 && pointZ <= maxZ + 0.005) {
-            if (newInner[i] < drillRadius) {
-              newInner[i] = Math.min(state.latheProfile[i] - 0.02, drillRadius)
+          if (pointZ >= tipZ && pointZ <= 0.001) {
+            let targetInnerR = drillRad
+            if (pointZ < tipZ + coneLength) {
+              const distFromTip = Math.max(0, pointZ - tipZ)
+              targetInnerR = (distFromTip / coneLength) * drillRad
+            }
+            if (newInner[i] < targetInnerR) {
+              newInner[i] = Math.min(state.latheProfile[i] - 0.015, targetInnerR)
               innerMod = true
             }
           }
@@ -157,8 +278,8 @@ export const useMachineStore = create<MachineState>((set) => ({
         return innerMod ? { innerProfile: newInner } : state
       }
 
-      // 2. Wytaczanie wewnętrzne wytaczakiem T0505 (roztaczanie otworu na większą średnicę!)
-      if (state.activeTool === 5) {
+      // 2. WYTACZAK WEWNĘTRZNY (SCLCR)
+      if (tool.type === 'SCLCR') {
         const minZ = Math.min(prevZ, z)
         const maxZ = Math.max(prevZ, z)
         const startIndex = Math.max(0, Math.floor(((minZ + len) / len) * (Z_STEPS - 1)) - 1)
@@ -176,7 +297,7 @@ export const useMachineStore = create<MachineState>((set) => ({
             } else {
               currentR = Math.max(prevR, r)
             }
-            if (currentR > newInner[i] && currentR < state.latheProfile[i] - 0.02) {
+            if (currentR > newInner[i] && currentR < state.latheProfile[i] - 0.015) {
               newInner[i] = currentR
               innerMod = true
             }
@@ -185,10 +306,13 @@ export const useMachineStore = create<MachineState>((set) => ({
         return innerMod ? { innerProfile: newInner } : state
       }
 
-      // 3. Toczenie zewnętrzne (T0101), Rowkowanie/Podcięcie (T0202) i Gwintowanie (T0303)
-      // Jeśli to nóż rowkujący T0202 lub czysty wjazd poprzeczny w głąb materiału, uwzględniamy szerokość płytki!
-      const isPlungeCut = Math.abs(dz) < 0.0005 && r < prevR && z < -0.02
-      const grooveHalfWidth = state.activeTool === 2 ? 0.06 : isPlungeCut ? 0.045 : 0.004
+      // 3. TOCZENIE ZEWNĘTRZNE (DCLNR, SVJBR, SVJBL), GWINTOWANIE (THREAD) ORAZ UCINAK (GROOVE)
+      const grooveHalfWidth =
+        tool.type === 'GROOVE'
+          ? (tool.width || 0.10) / 2
+          : Math.abs(dz) < 0.0005 && r < prevR && z < -0.02
+          ? 0.025
+          : 0.003
 
       const minZ = Math.min(prevZ, z) - grooveHalfWidth
       const maxZ = Math.max(prevZ, z) + grooveHalfWidth
@@ -222,7 +346,7 @@ export const useMachineStore = create<MachineState>((set) => ({
       return modified ? { latheProfile: newProfile } : state
     }),
 
-  currentPosition: { x: DEFAULT_DIA + 1.0, y: 0, z: 1.0 },
+  currentPosition: { x: INITIAL_DIA + 1.0, y: 0, z: 1.0 },
   setCurrentPosition: (pos) =>
     set((state) => {
       let rpm = state.spindleSpeed
@@ -237,7 +361,7 @@ export const useMachineStore = create<MachineState>((set) => ({
       return { currentPosition: pos, actualRpm: rpm }
     }),
 
-  targetPosition: { x: DEFAULT_DIA + 1.0, y: 0, z: 1.0 },
+  targetPosition: { x: INITIAL_DIA + 1.0, y: 0, z: 1.0 },
   arcParams: {},
   updatePosition: (pos, arc = {}) =>
     set((state) => ({
@@ -249,6 +373,7 @@ export const useMachineStore = create<MachineState>((set) => ({
   positioningMode: 'G90',
   unitMode: 'G21',
   spindleMode: 'G96',
+  spindleDir: 'M03',
   feedMode: 'G95',
   feedRate: 0.2,
   spindleSpeed: 200,
@@ -259,23 +384,29 @@ export const useMachineStore = create<MachineState>((set) => ({
   setModalState: (newState) => set((state) => ({ ...state, ...newState })),
 
   gcodeLines: [],
+  savedGcodeText: saved?.gcodeText ?? '',
   compiledSteps: [],
   currentStepIndex: 0,
   currentLineIndex: 0,
   isPlaying: false,
 
-  loadProgram: (lines, steps = []) =>
-    set({
-      gcodeLines: lines,
-      compiledSteps: steps,
-      currentStepIndex: 0,
-      currentLineIndex: 0,
-      isPlaying: false,
+  loadProgram: (lines, steps = [], rawText) =>
+    set((state) => {
+      if (rawText !== undefined) {
+        saveLightState({ gcodeText: rawText })
+      }
+      return {
+        gcodeLines: lines,
+        savedGcodeText: rawText ?? state.savedGcodeText,
+        compiledSteps: steps,
+        currentStepIndex: 0,
+        currentLineIndex: 0,
+        isPlaying: false,
+      }
     }),
 
   playProgram: () =>
     set((state) => {
-      // Jeśli program skończył się na M30 i klikamy ponownie CYCLE START, startujemy od kroku 0
       if (state.currentStepIndex >= state.compiledSteps.length - 1 && state.compiledSteps.length > 0) {
         const first = state.compiledSteps[0]
         return {
@@ -289,6 +420,7 @@ export const useMachineStore = create<MachineState>((set) => ({
           feedRate: first.feedRate,
           spindleSpeed: first.spindleSpeed,
           spindleMode: first.spindleMode,
+          spindleDir: first.spindleDir,
           maxSpindleSpeed: first.maxSpindleSpeed,
           feedMode: first.feedMode,
           activeTool: first.toolNumber,
@@ -304,13 +436,13 @@ export const useMachineStore = create<MachineState>((set) => ({
     set((state) => {
       const nextStepIdx = state.currentStepIndex + 1
       if (nextStepIdx >= state.compiledSteps.length) {
-        // Koniec programu (M30): przewijamy wskaźnik linii na początek (linia 0) i zatrzymujemy wrzeciono!
         return {
           isPlaying: false,
           currentStepIndex: 0,
           currentLineIndex: 0,
           spindleSpeed: 0,
           actualRpm: 0,
+          spindleDir: 'M05',
           coolant: false,
         }
       }
@@ -322,6 +454,7 @@ export const useMachineStore = create<MachineState>((set) => ({
           currentLineIndex: 0,
           spindleSpeed: 0,
           actualRpm: 0,
+          spindleDir: 'M05',
           coolant: false,
         }
       }
@@ -335,6 +468,7 @@ export const useMachineStore = create<MachineState>((set) => ({
         feedRate: nextStep.feedRate,
         spindleSpeed: nextStep.spindleSpeed,
         spindleMode: nextStep.spindleMode,
+        spindleDir: nextStep.spindleDir,
         maxSpindleSpeed: nextStep.maxSpindleSpeed,
         feedMode: nextStep.feedMode,
         activeTool: nextStep.toolNumber,
@@ -360,6 +494,7 @@ export const useMachineStore = create<MachineState>((set) => ({
       motionMode: 'G0',
       positioningMode: 'G90',
       spindleMode: 'G96',
+      spindleDir: 'M03',
       feedRate: 0.2,
       spindleSpeed: 0,
       actualRpm: 0,
