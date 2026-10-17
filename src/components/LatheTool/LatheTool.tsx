@@ -1,127 +1,283 @@
-import { useRef, useState } from 'react'
+import { useRef, useEffect, useMemo } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { useMachineStore } from '../../store'
-import { parseGCodeLine } from '../../parser'
+import { ToolModel } from './ToolModel'
+
+interface ArcState {
+  active: boolean
+  cx: number
+  cy: number
+  startAngle: number
+  totalAngle: number
+  radius: number
+  arcLength: number
+  progress: number
+}
+
+// Pomocnicza funkcja wyliczająca parametry łuku dla animacji ORAZ dla rysowania ścieżki 3D
+function computeArcGeometry(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  isClockwise: boolean,
+  arc?: { i?: number; k?: number; r?: number }
+) {
+  let cx = x1
+  let cy = y1
+
+  if (arc?.r !== undefined && arc.r !== 0) {
+    const r = Math.abs(arc.r)
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const d = Math.hypot(dx, dy)
+    const radius = Math.max(r, d / 2)
+    const h = Math.sqrt(Math.max(0, radius * radius - (d * d) / 4))
+    const mx = (x1 + x2) / 2
+    const my = (y1 + y2) / 2
+    const sign = isClockwise ? -1 : 1
+    cx = mx + (sign * h * dy) / d
+    cy = my - (sign * h * dx) / d
+  } else {
+    cx = x1 + (arc?.k || 0)
+    cy = y1 + (arc?.i || 0)
+  }
+
+  const radius = Math.hypot(x1 - cx, y1 - cy)
+  const startAngle = Math.atan2(y1 - cy, x1 - cx)
+  let endAngle = Math.atan2(y2 - cy, x2 - cx)
+
+  if (isClockwise) {
+    while (endAngle >= startAngle - 0.0001) endAngle -= Math.PI * 2
+  } else {
+    while (endAngle <= startAngle + 0.0001) endAngle += Math.PI * 2
+  }
+
+  const totalAngle = endAngle - startAngle
+  const arcLength = Math.max(0.001, Math.abs(totalAngle) * radius)
+
+  return { cx, cy, startAngle, totalAngle, radius, arcLength }
+}
 
 export function LatheTool() {
   const meshRef = useRef<THREE.Group>(null)
-  
+
   const targetPosition = useMachineStore((state) => state.targetPosition)
+  const arcParams = useMachineStore((state) => state.arcParams)
   const setCurrentPosition = useMachineStore((state) => state.setCurrentPosition)
   const feedRate = useMachineStore((state) => state.feedRate)
+  const feedMode = useMachineStore((state) => state.feedMode)
+  const actualRpm = useMachineStore((state) => state.actualRpm)
+  const spindleSpeed = useMachineStore((state) => state.spindleSpeed)
   const motionMode = useMachineStore((state) => state.motionMode)
   const carveLatheProfile = useMachineStore((state) => state.carveLatheProfile)
-  
+
   const isPlaying = useMachineStore((state) => state.isPlaying)
-  const gcodeLines = useMachineStore((state) => state.gcodeLines)
-  const currentLineIndex = useMachineStore((state) => state.currentLineIndex)
-  const advanceLine = useMachineStore((state) => state.advanceLine)
+  const compiledSteps = useMachineStore((state) => state.compiledSteps)
+  const currentStepIndex = useMachineStore((state) => state.currentStepIndex)
+  const advanceStep = useMachineStore((state) => state.advanceStep)
   const pauseProgram = useMachineStore((state) => state.pauseProgram)
 
-  const targetVec = new THREE.Vector3()
-  const lastPos = useRef(new THREE.Vector2(0, 0))
-  const [arcProgress, setArcProgress] = useState(1) 
-  const arcData = useRef<any>(null)
+  const stockDiameter = useMachineStore((state) => state.stockDiameter)
+  const showToolpath = useMachineStore((state) => state.showToolpath)
+
+  const targetVec = useRef(new THREE.Vector3())
+  const lastPos = useRef(new THREE.Vector2(1.0, 1.5))
+  const arcRef = useRef<ArcState>({
+    active: false,
+    cx: 0,
+    cy: 0,
+    startAngle: 0,
+    totalAngle: 0,
+    radius: 0,
+    arcLength: 0,
+    progress: 1,
+  })
+
+  // --- GENEROWANIE LINII PODGLĄDU ŚCIEŻKI NARZĘDZIA (BACKPLOT) ---
+  const { rapidGeo, cutGeo } = useMemo(() => {
+    const rapidPts: THREE.Vector3[] = []
+    const cutPts: THREE.Vector3[] = []
+
+    let curZ = 1.0
+    let curR = (stockDiameter + 1.0) / 2
+
+    for (const step of compiledSteps) {
+      const nextZ = step.target.z
+      const nextR = step.target.x / 2
+
+      if (step.motionMode === 'G0') {
+        rapidPts.push(new THREE.Vector3(curZ, curR, 0.02))
+        rapidPts.push(new THREE.Vector3(nextZ, nextR, 0.02))
+      } else if (step.motionMode === 'G1') {
+        cutPts.push(new THREE.Vector3(curZ, curR, 0.03))
+        cutPts.push(new THREE.Vector3(nextZ, nextR, 0.03))
+      } else if (step.motionMode === 'G2' || step.motionMode === 'G3') {
+        const isCW = step.motionMode === 'G2'
+        const { cx, cy, startAngle, totalAngle, radius } = computeArcGeometry(
+          curZ,
+          curR,
+          nextZ,
+          nextR,
+          isCW,
+          step.arc
+        )
+        const segments = 24
+        let prevArcPt = new THREE.Vector3(curZ, curR, 0.03)
+        for (let s = 1; s <= segments; s++) {
+          const ang = startAngle + totalAngle * (s / segments)
+          const pt = new THREE.Vector3(
+            cx + Math.cos(ang) * radius,
+            cy + Math.sin(ang) * radius,
+            0.03
+          )
+          cutPts.push(prevArcPt, pt)
+          prevArcPt = pt
+        }
+      }
+
+      curZ = nextZ
+      curR = nextR
+    }
+
+    return {
+      rapidGeo: new THREE.BufferGeometry().setFromPoints(rapidPts),
+      cutGeo: new THREE.BufferGeometry().setFromPoints(cutPts),
+    }
+  }, [compiledSteps, stockDiameter])
+
+  useEffect(() => {
+    return () => {
+      rapidGeo.dispose()
+      cutGeo.dispose()
+    }
+  }, [rapidGeo, cutGeo])
+
+  useEffect(() => {
+    if (meshRef.current) {
+      const state = useMachineStore.getState()
+      meshRef.current.position.set(state.currentPosition.z, state.currentPosition.x / 2, 0)
+      lastPos.current.set(state.currentPosition.z, state.currentPosition.x / 2)
+    }
+  }, [])
+
+  useEffect(() => {
+    arcRef.current.active = false
+    arcRef.current.progress = 0
+  }, [targetPosition, arcParams, motionMode])
 
   useFrame((_, delta) => {
     if (!meshRef.current) return
-    targetVec.set(targetPosition.z, targetPosition.x, 0)
+
+    const targetZ = targetPosition.z
+    const targetRadius = targetPosition.x / 2
+    targetVec.current.set(targetZ, targetRadius, 0)
+
     const currentVec = meshRef.current.position
     lastPos.current.set(currentVec.x, currentVec.y)
-    let speed = feedRate > 0 ? feedRate / 60 : 10.0
-    if (motionMode === 'G0') speed = 10.0 
 
+    const rpm = actualRpm > 0 ? actualRpm : spindleSpeed > 0 ? spindleSpeed : 1000
+    let speed = 5.0
+
+    if (motionMode !== 'G0') {
+      if (feedMode === 'G95') {
+        const f = feedRate > 0 ? feedRate : 0.01
+        speed = Math.max(0.2, (rpm * f) / 60)
+      } else {
+        const f = feedRate > 0 ? feedRate : 10
+        speed = Math.max(0.2, f / 60)
+      }
+    }
+
+    const distance = currentVec.distanceTo(targetVec.current)
     let isMoving = false
 
-    if (motionMode === 'G0' || motionMode === 'G1') {
-      const distance = currentVec.distanceTo(targetVec)
+    if (motionMode === 'G0' || motionMode === 'G1' || !motionMode) {
       if (distance > 0.0001) {
         isMoving = true
         const step = Math.min(speed * delta, distance)
-        const dir = targetVec.clone().sub(currentVec).normalize()
+        const dir = targetVec.current.clone().sub(currentVec).normalize()
         currentVec.add(dir.multiplyScalar(step))
       }
-    } 
-    else if (motionMode === 'G2' || motionMode === 'G3') {
-      const distance = currentVec.distanceTo(targetVec)
-      
-      if (distance > 0.0001 && arcProgress >= 1) {
-        setArcProgress(0) 
-        isMoving = true
-
-        
-        const cx = currentVec.x + (targetPosition.k || 0) 
-        const cy = currentVec.y + (targetPosition.i || 0) 
-        
-        const startAngle = Math.atan2(currentVec.y - cy, currentVec.x - cx)
-        
-        let endAngle = Math.atan2(targetVec.y - cy, targetVec.x - cx)
-
+    } else if (motionMode === 'G2' || motionMode === 'G3') {
+      if (distance > 0.0001 && !arcRef.current.active && arcRef.current.progress < 1) {
         const isClockwise = motionMode === 'G2'
-        
-        if (isClockwise) {
-          while (endAngle > startAngle) endAngle -= Math.PI * 2
-        } else {
-          while (endAngle < startAngle) endAngle += Math.PI * 2
+        const geom = computeArcGeometry(
+          currentVec.x,
+          currentVec.y,
+          targetZ,
+          targetRadius,
+          isClockwise,
+          arcParams
+        )
+        arcRef.current = {
+          active: true,
+          ...geom,
+          progress: 0,
         }
-        
-        const totalAngle = endAngle - startAngle
-        const radius = Math.sqrt(Math.pow(currentVec.x - cx, 2) + Math.pow(currentVec.y - cy, 2))
-        const arcLength = Math.abs(totalAngle) * radius
-
-        arcData.current = { cx, cy, startAngle, totalAngle, radius, arcLength }
-      } 
-      else if (arcProgress < 1 && arcData.current) {
         isMoving = true
-        const { cx, cy, startAngle, totalAngle, arcLength, radius } = arcData.current
-        
-        const stepPercent = (speed * delta) / arcLength
-        const newProgress = Math.min(arcProgress + stepPercent, 1)
-        
-        const currentAngle = startAngle + (totalAngle * newProgress)
-        
-        currentVec.x = cx + Math.cos(currentAngle) * radius
-        currentVec.y = cy + Math.sin(currentAngle) * radius
-        
-        setArcProgress(newProgress)
+      }
+
+      if (arcRef.current.active && arcRef.current.progress < 1) {
+        isMoving = true
+        const arc = arcRef.current
+        const stepPercent = (speed * delta) / arc.arcLength
+        arc.progress = Math.min(1, arc.progress + stepPercent)
+
+        if (arc.progress >= 1) {
+          currentVec.set(targetZ, targetRadius, 0)
+          arc.active = false
+        } else {
+          const currentAngle = arc.startAngle + arc.totalAngle * arc.progress
+          currentVec.x = arc.cx + Math.cos(currentAngle) * arc.radius
+          currentVec.y = arc.cy + Math.sin(currentAngle) * arc.radius
+        }
       }
     }
 
     if (isMoving) {
-     setCurrentPosition({ x: currentVec.y, y: 0, z: currentVec.x })
-      
+      setCurrentPosition({
+        x: currentVec.y * 2,
+        y: 0,
+        z: currentVec.x,
+      })
+
       if (motionMode === 'G1' || motionMode === 'G2' || motionMode === 'G3') {
         carveLatheProfile(currentVec.x, currentVec.y, lastPos.current.x, lastPos.current.y)
       }
-    } 
-    else {
-      if (arcProgress < 1) setArcProgress(1) 
-
+    } else {
       if (isPlaying) {
-        if (currentLineIndex < gcodeLines.length) {
-          const nextLine = gcodeLines[currentLineIndex]
-          parseGCodeLine(nextLine)
-          advanceLine()
+        if (currentStepIndex < compiledSteps.length - 1) {
+          advanceStep()
         } else {
           pauseProgram()
         }
       }
     }
   })
-  return (
-    <group ref={meshRef} position={[0, 0, 0]}>
-      <mesh position={[0, 1.5, 0]}>
-        <boxGeometry args={[0.5, 3, 0.5]} />
-        <meshStandardMaterial color="#333" metalness={0.7} roughness={0.4} />
-      </mesh>
-      
-      <mesh position={[0, -0.05, 0]} rotation={[0, 0, Math.PI / 4]}>
-        <boxGeometry args={[0.3, 0.3, 0.51]} />
-        <meshStandardMaterial color="#eab308" metalness={0.5} roughness={0.5} />
-      </mesh>
 
-      <axesHelper args={[0.5]} />
-    </group>
+  return (
+    <>
+      {/* WIZUALIZACJA LINII ŚCIEŻKI (G0 - pomarańczowy, G1/G2/G3 - zielony) */}
+      {showToolpath && (
+        <group>
+          <lineSegments geometry={rapidGeo}>
+            <lineBasicMaterial color="#f59e0b" transparent opacity={0.55} />
+          </lineSegments>
+          <lineSegments geometry={cutGeo}>
+            <lineBasicMaterial color="#10b981" transparent opacity={0.95} />
+          </lineSegments>
+        </group>
+      )}
+
+      {/* NÓŻ TOKARSKI DCLNR / DCLNL */}
+    <group ref={meshRef}>
+        <group position={[0, 0, -0.34]}>
+          <ToolModel hand="DCLNR" />
+        </group>
+        <axesHelper args={[0.25]} />
+      </group>
+    </>
   )
 }

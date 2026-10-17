@@ -2,7 +2,6 @@ import { useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { useMachineStore } from '../../store'
-import { parseGCodeLine } from '../../parser'
 
 export function ToolHead() {
   const meshRef = useRef<THREE.Group>(null)
@@ -59,8 +58,8 @@ export function ToolHead() {
       // Pobieranie kolejnej linii z pliku
       if (state.isPlaying) {
         if (state.currentLineIndex < state.gcodeLines.length) {
-          const nextLine = state.gcodeLines[state.currentLineIndex]
-          parseGCodeLine(nextLine)
+          // const nextLine = state.gcodeLines[state.currentLineIndex]
+          // parseGCodeLine(nextLine)
           state.advanceLine()
         } else {
           state.pauseProgram()
