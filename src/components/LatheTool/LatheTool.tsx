@@ -17,11 +17,11 @@ interface ArcState {
 
 // Pomocnicza funkcja wyliczająca parametry łuku dla animacji ORAZ dla rysowania ścieżki 3D
 function computeArcGeometry(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  isClockwise: boolean,
+  x1: number, // Start Z
+  y1: number, // Start Promień (X/2)
+  x2: number, // Koniec Z
+  y2: number, // Koniec Promień (X/2)
+  isClockwise: boolean, // G02 = true, G03 = false
   arc?: { i?: number; k?: number; r?: number }
 ) {
   let cx = x1
@@ -36,9 +36,11 @@ function computeArcGeometry(
     const h = Math.sqrt(Math.max(0, radius * radius - (d * d) / 4))
     const mx = (x1 + x2) / 2
     const my = (y1 + y2) / 2
-    const sign = isClockwise ? -1 : 1
-    cx = mx + (sign * h * dy) / d
-    cy = my - (sign * h * dx) / d
+
+
+   const sign = (isClockwise ? -1 : 1) * (arc.r > 0 ? 1 : -1)
+    cx = mx - (sign * h * dy) / (d || 1)
+    cy = my + (sign * h * dx) / (d || 1)
   } else {
     cx = x1 + (arc?.k || 0)
     cy = y1 + (arc?.i || 0)
@@ -48,13 +50,17 @@ function computeArcGeometry(
   const startAngle = Math.atan2(y1 - cy, x1 - cx)
   let endAngle = Math.atan2(y2 - cy, x2 - cx)
 
+  // Obliczamy różnicę kątową i wymuszamy właściwy kierunek obrotu
+  let totalAngle = endAngle - startAngle
   if (isClockwise) {
-    while (endAngle >= startAngle - 0.0001) endAngle -= Math.PI * 2
+    // G02 w układzie (Z=X_3D, R=Y_3D) dla tylnego imaka i R>0: wybieramy krótszy łuk (< PI)
+    while (totalAngle <= -Math.PI) totalAngle += Math.PI * 2
+    while (totalAngle > Math.PI) totalAngle -= Math.PI * 2
   } else {
-    while (endAngle <= startAngle + 0.0001) endAngle += Math.PI * 2
+    while (totalAngle <= -Math.PI) totalAngle += Math.PI * 2
+    while (totalAngle > Math.PI) totalAngle -= Math.PI * 2
   }
 
-  const totalAngle = endAngle - startAngle
   const arcLength = Math.max(0.001, Math.abs(totalAngle) * radius)
 
   return { cx, cy, startAngle, totalAngle, radius, arcLength }
@@ -62,7 +68,7 @@ function computeArcGeometry(
 
 export function LatheTool() {
   const meshRef = useRef<THREE.Group>(null)
-
+  const activeTool = useMachineStore((state) => state.activeTool)
   const targetPosition = useMachineStore((state) => state.targetPosition)
   const arcParams = useMachineStore((state) => state.arcParams)
   const setCurrentPosition = useMachineStore((state) => state.setCurrentPosition)
@@ -274,7 +280,7 @@ export function LatheTool() {
       {/* NÓŻ TOKARSKI DCLNR / DCLNL */}
     <group ref={meshRef}>
         <group position={[0, 0, -0.34]}>
-          <ToolModel hand="DCLNR" />
+          <ToolModel toolNumber={activeTool}/>
         </group>
         <axesHelper args={[0.25]} />
       </group>

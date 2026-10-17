@@ -2,15 +2,36 @@ import { useState, type FormEvent, } from 'react'
 import { useMachineStore } from '../../store'
 import { compileGCodeProgram, } from '../../parser/useCodeParser'
 
+const DEMO_MILL_PROGRAM = [
+  '(DEMO FREZARKA 3-OS: KIESZEN OBWODOWA Z 4 LUKAMI G02 + WIERCENIE G83)',
+  'G21 G90 G94',
+  'S3500 M03',
+  'G00 X0.8 Y1.3 Z0.5 T01 M08',
+  'G01 Z-0.3 F150 (WEJSCIE W MATERIAL)',
+  'G01 X0.8 Y2.7 F240 (BOK LEWY)',
+  'G02 X1.3 Y3.2 R0.5 (LUK GORA-LEWO CW)',
+  'G01 X2.7 Y3.2 (BOK GORNY)',
+  'G02 X3.2 Y2.7 R0.5 (LUK GORA-PRAWO CW)',
+  'G01 X3.2 Y1.3 (BOK PRAWY)',
+  'G02 X2.7 Y0.8 R0.5 (LUK DOL-PRAWO CW)',
+  'G01 X1.3 Y0.8 (BOK DOLNY)',
+  'G02 X0.8 Y1.3 R0.5 (LUK DOL-LEWO CW)',
+  'G00 Z0.5',
+  '(WIERCENIE CENTRALNEGO OTWORU G83)',
+  'G00 X2.0 Y2.0',
+  'G83 Z-0.9 R0.1 Q0.3 F180',
+  'G00 Z1.0 M09',
+  'M30',
+]
 // Kompleksowy program demonstracyjny: G96 (CSS), G71, G70, G75, Gwint G76 oraz Wiercenie G83
 const DEMO_LATHE_PROGRAM = [
-  '(DEMO FANUC: G96 + G71/G70 + GWINT G76 + WIERCENIE G83)',
+  '(DEMO FANUC: 5 NARZEDZI - ZEWN + ROWEK + GWINT + WIERTLO + WYTACZAK)',
   'G20 G99',
   'G50 S3000 (LIMIT MAX OBROTOW)',
-  'G96 S250 M03 (STALA PREDKOSC SKRAWANIA)',
+  'G96 S250 M03 (T0101 - NOZ ZEWN DCLNR)',
   'G00 X2.2 Z0.1 T0101 M08',
   'G01 X2.0 Z0.0 F0.01',
-  'G01 X0.0 F0.006 (PLANOWANIE - OBSERWUJ WZROST RPM!)',
+  'G01 X0.0 F0.006 (PLANOWANIE CZOLA)',
   'G00 X2.1 Z0.1',
   'G71 U0.1 R0.05',
   'G71 P10 Q20 U0.02 W0.005 F0.012',
@@ -21,19 +42,33 @@ const DEMO_LATHE_PROGRAM = [
   'G01 X1.9 Z-2.8',
   'N20 G01 Z-3.4',
   'G70 P10 Q20 F0.005 (WYKANCZANIE KONTURU)',
-  'G00 X2.2 Z-1.15 T0202',
-  'G75 X0.85 P200 F0.004 (PODCIECIE POD GWINT)',
   'G28 U0 W0',
-  '(N03 - GWINTOWANIE G76 NA SREDNICY X1.0)',
+  '(T0202 - NOZ ROWKUJACY: PODCIECIE ZA GWINTEM)',
+  'G97 S900 T0202',
+  'G00 X1.2 Z-1.02',
+  'G75 X0.80 P150 F0.004 (PODCIECIE POD GWINT)',
+  'G28 U0 W0',
+  '(T0303 - NOZ GWINTOWY 60 STOPNI: CYKL G76)',
   'G97 S800 T0303',
   'G00 X1.15 Z0.15',
   'G76 P010060 Q50 R0.02',
-  'G76 X0.86 Z-1.05 P70 Q25 F0.1',
+  'G76 X0.86 Z-0.98 P70 Q25 F0.1',
   'G28 U0 W0',
-  '(N04 - WIERCENIE GLEBOKIE G83 W OSI - WLACZ PRZEKROJ 180!)',
+  '(T0404 - WIERTLO OSIOWE: WIERCENIE G83)',
   'G97 S1100 T0404',
   'G00 X0.0 Z0.2',
-  'G83 Z-2.4 R0.1 Q0.45 F0.006',
+  'G83 Z-2.5 R0.1 Q0.5 F0.006',
+  'G28 U0 W0',
+  '(T0505 - WYTACZAK WEWNETRZNY: ROZTACZANIE OTWORU)',
+  'G96 S200 T0505',
+  'G00 X0.52 Z0.1',
+  'G01 Z-1.2 F0.006 (ROZTACZANIE SREDNICY WEWN)',
+  'G01 X0.45 Z-1.25',
+  'G00 Z0.2',
+  'G00 X0.76 Z0.1',
+  'G01 Z-1.15 F0.005 (GNIAZDO POD LOZYSKO WEWN)',
+  'G01 X0.45',
+  'G00 Z0.3',
   'G28 U0 W0 M09',
   'M30',
 ]
@@ -134,13 +169,17 @@ export function ControlPanel() {
           <button
             type="button"
             onClick={() => {
-              const demo = DEMO_LATHE_PROGRAM.join('\n')
+              const demo = (
+                machine.machineType === 'mill' ? DEMO_MILL_PROGRAM : DEMO_LATHE_PROGRAM
+              ).join('\n')
               setEditorText(demo)
               compileAndLoad(demo)
             }}
             className="text-[11px] bg-orange-600/20 hover:bg-orange-600/40 text-orange-300 border border-orange-500/40 px-2.5 py-1 rounded font-semibold transition-colors"
           >
-            Załaduj Demo (G71+G76+G83)
+            {machine.machineType === 'mill'
+              ? 'Załaduj Demo Frezarki'
+              : 'Załaduj Demo Tokarki'}
           </button>
         </div>
 
@@ -170,10 +209,10 @@ export function ControlPanel() {
           {isEditingCode ? (
             <textarea
               value={editorText}
-              onChange={(e) => setEditorText(e.target.value.toUpperCase())}
+              onChange={(e) => setEditorText(e.target.value)}
               spellCheck={false}
               placeholder="Wklej tutaj G-code z Fusion 360 / CAM..."
-              className="flex-1 w-full bg-zinc-950 text-emerald-400 font-mono text-xs p-3 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none resize-none leading-relaxed"
+              className="flex-1 w-full bg-zinc-950 text-emerald-400 font-mono text-xs p-3 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none resize-none leading-relaxed uppercase"
             />
           ) : (
             <div className="flex-1 w-full bg-zinc-950 p-2 rounded border border-zinc-800 overflow-y-auto font-mono text-xs text-zinc-400">

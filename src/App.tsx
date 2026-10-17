@@ -1,7 +1,7 @@
-import { Canvas } from "@react-three/fiber";
-import { ControlPanel, LatheTool, LatheWorkpiece, ToolHead, Workpiece } from "./components";
-import { Environment, Grid, OrbitControls } from "@react-three/drei";
-import { useMachineStore } from "./store";
+import { Canvas } from '@react-three/fiber'
+import { ControlPanel, LatheTool, LatheWorkpiece, ToolHead, Workpiece } from './components'
+import { Environment, Grid, OrbitControls } from '@react-three/drei'
+import { useMachineStore } from './store'
 
 export default function App() {
   const machineType = useMachineStore((state) => state.machineType)
@@ -10,12 +10,13 @@ export default function App() {
     <div className="flex h-screen w-full bg-zinc-900 text-white overflow-hidden">
       <ControlPanel />
 
-      <div className="flex-1 cursor-move relative">
-        <Canvas camera={{ position: [0, 5, 10], fov: 45 }}>
+      {/* mr-[340px] rezerwuje miejsce dla prawego panelu DRO, dzięki czemu środek kamery 3D jest na środku wolnego miejsca */}
+      <div className="flex-1 mr-[340px] cursor-move relative">
+        <Canvas camera={{ position: [2, 4, 7], fov: 45 }}>
           <Environment preset="city" />
           <ambientLight intensity={0.5} />
           <directionalLight position={[10, 15, 10]} intensity={1} castShadow />
-          
+
           {machineType === 'mill' ? (
             <>
               <ToolHead />
@@ -27,16 +28,16 @@ export default function App() {
               <LatheWorkpiece />
             </>
           )}
-          
-          <Grid 
-            infiniteGrid 
-            fadeDistance={25} 
-            sectionColor="#555" 
-            cellColor="#2a2a2a" 
-            sectionSize={1} 
-            cellSize={0.25} 
+
+          <Grid
+            infiniteGrid
+            fadeDistance={25}
+            sectionColor="#555"
+            cellColor="#2a2a2a"
+            sectionSize={1}
+            cellSize={0.25}
           />
-          <OrbitControls makeDefault />
+          <OrbitControls makeDefault target={machineType === 'mill' ? [2, 0, -2] : [-1.5, 0, 0]} />
         </Canvas>
       </div>
     </div>

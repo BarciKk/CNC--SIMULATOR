@@ -40,36 +40,32 @@ export interface ExecutionStep {
   feedMode: FeedMode
   toolNumber: number
   coolant: boolean
+  isProgramEnd?: boolean // Flaga dla M30 / M02
 }
 
 interface MachineState {
   machineType: MachineType
   setMachineType: (type: MachineType) => void
 
-  // Opcje wizualizacji
   workpieceViewMode: WorkpieceViewMode
   setWorkpieceViewMode: (mode: WorkpieceViewMode) => void
   showToolpath: boolean
   setShowToolpath: (show: boolean) => void
 
-  // Wymiary materiału
   stockDiameter: number
   stockLength: number
   setStockDimensions: (diameter: number, length: number) => void
 
-  // Profil tokarki (Zewnętrzny OD + Wewnętrzny ID pod wiercenie G83 / wytaczanie)
   latheProfile: number[]
   innerProfile: number[]
   carveLatheProfile: (z: number, radius: number, prevZ: number, prevR: number) => void
 
-  // Pozycjonowanie i DRO
   currentPosition: Position
   setCurrentPosition: (pos: Position) => void
   targetPosition: Position
   arcParams: ArcParams
   updatePosition: (pos: Partial<Position>, arc?: ArcParams) => void
 
-  // Tryby modalne Fanuc
   motionMode: MotionMode
   positioningMode: PositioningMode
   unitMode: UnitMode
@@ -83,7 +79,6 @@ interface MachineState {
   coolant: boolean
   setModalState: (state: Partial<MachineState>) => void
 
-  // Sterowanie programem
   gcodeLines: string[]
   compiledSteps: ExecutionStep[]
   currentStepIndex: number
@@ -95,7 +90,6 @@ interface MachineState {
   advanceStep: () => void
   advanceLine: () => void
 
-  // Frezarka
   completedCuts: CutSegment[]
   activeCut: CutSegment | null
   setActiveCut: (cut: CutSegment | null) => void
@@ -134,23 +128,26 @@ export const useMachineStore = create<MachineState>((set) => ({
   carveLatheProfile: (z, r, prevZ, prevR) =>
     set((state) => {
       const len = state.stockLength
-      if (Math.min(prevZ, z) > 0.001 || Math.max(prevZ, z) < -len - 0.001) {
+      if (Math.min(prevZ, z) > 0.01 || Math.max(prevZ, z) < -len - 0.01) {
         return state
       }
 
-      const minZ = Math.min(prevZ, z)
-      const maxZ = Math.max(prevZ, z)
-      const startIndex = Math.max(0, Math.floor(((minZ + len) / len) * (Z_STEPS - 1)) - 1)
-      const endIndex = Math.min(Z_STEPS - 1, Math.ceil(((maxZ + len) / len) * (Z_STEPS - 1)) + 1)
+      const dz = z - prevZ
+      const dr = r - prevR
 
-      // 1. Wewnętrzne wiercenie w osi (G83 / G74 przy X ~ 0, ruch w głąb Z)
-      if (Math.abs(r) < 0.001 && Math.abs(prevR) < 0.001 && z < prevZ) {
+      // 1. Wewnętrzne wiercenie w osi (T0404 lub ruch po X=0)
+      if ((state.activeTool === 4 || (Math.abs(r) < 0.005 && Math.abs(prevR) < 0.005)) && z < prevZ) {
+        const minZ = Math.min(prevZ, z)
+        const maxZ = Math.max(prevZ, z)
+        const startIndex = Math.max(0, Math.floor(((minZ + len) / len) * (Z_STEPS - 1)) - 1)
+        const endIndex = Math.min(Z_STEPS - 1, Math.ceil(((maxZ + len) / len) * (Z_STEPS - 1)) + 1)
+
         const newInner = [...state.innerProfile]
-        const drillRadius = 0.22 // Wizualny promień wiertła w osi (średnica Ø0.44)
+        const drillRadius = 0.25 // Promień wiertła T0404 (średnica Ø0.50)
         let innerMod = false
         for (let i = startIndex; i <= endIndex; i++) {
           const pointZ = -len + (i / (Z_STEPS - 1)) * len
-          if (pointZ >= minZ - 0.001 && pointZ <= maxZ + 0.001) {
+          if (pointZ >= minZ - 0.005 && pointZ <= maxZ + 0.005) {
             if (newInner[i] < drillRadius) {
               newInner[i] = Math.min(state.latheProfile[i] - 0.02, drillRadius)
               innerMod = true
@@ -160,19 +157,56 @@ export const useMachineStore = create<MachineState>((set) => ({
         return innerMod ? { innerProfile: newInner } : state
       }
 
-      // 2. Toczenie zewnętrzne (OD) i gwintowanie (G76)
+      // 2. Wytaczanie wewnętrzne wytaczakiem T0505 (roztaczanie otworu na większą średnicę!)
+      if (state.activeTool === 5) {
+        const minZ = Math.min(prevZ, z)
+        const maxZ = Math.max(prevZ, z)
+        const startIndex = Math.max(0, Math.floor(((minZ + len) / len) * (Z_STEPS - 1)) - 1)
+        const endIndex = Math.min(Z_STEPS - 1, Math.ceil(((maxZ + len) / len) * (Z_STEPS - 1)) + 1)
+
+        const newInner = [...state.innerProfile]
+        let innerMod = false
+        for (let i = startIndex; i <= endIndex; i++) {
+          const pointZ = -len + (i / (Z_STEPS - 1)) * len
+          if (pointZ >= minZ - 0.005 && pointZ <= maxZ + 0.005) {
+            let currentR = r
+            if (Math.abs(dz) > 0.00001) {
+              const t = Math.max(0, Math.min(1, (pointZ - prevZ) / dz))
+              currentR = prevR + t * dr
+            } else {
+              currentR = Math.max(prevR, r)
+            }
+            if (currentR > newInner[i] && currentR < state.latheProfile[i] - 0.02) {
+              newInner[i] = currentR
+              innerMod = true
+            }
+          }
+        }
+        return innerMod ? { innerProfile: newInner } : state
+      }
+
+      // 3. Toczenie zewnętrzne (T0101), Rowkowanie/Podcięcie (T0202) i Gwintowanie (T0303)
+      // Jeśli to nóż rowkujący T0202 lub czysty wjazd poprzeczny w głąb materiału, uwzględniamy szerokość płytki!
+      const isPlungeCut = Math.abs(dz) < 0.0005 && r < prevR && z < -0.02
+      const grooveHalfWidth = state.activeTool === 2 ? 0.06 : isPlungeCut ? 0.045 : 0.004
+
+      const minZ = Math.min(prevZ, z) - grooveHalfWidth
+      const maxZ = Math.max(prevZ, z) + grooveHalfWidth
+
+      const startIndex = Math.max(0, Math.floor(((minZ + len) / len) * (Z_STEPS - 1)) - 1)
+      const endIndex = Math.min(Z_STEPS - 1, Math.ceil(((maxZ + len) / len) * (Z_STEPS - 1)) + 1)
+
       const newProfile = [...state.latheProfile]
       let modified = false
-      const dz = z - prevZ
 
       for (let i = startIndex; i <= endIndex; i++) {
         const pointZ = -len + (i / (Z_STEPS - 1)) * len
 
-        if (pointZ >= minZ - 0.0005 && pointZ <= maxZ + 0.0005) {
+        if (pointZ >= minZ && pointZ <= maxZ) {
           let currentR = r
-          if (Math.abs(dz) > 0.00001) {
+          if (Math.abs(dz) > 0.0005) {
             const t = Math.max(0, Math.min(1, (pointZ - prevZ) / dz))
-            currentR = prevR + t * (r - prevR)
+            currentR = prevR + t * dr
           } else {
             currentR = Math.min(prevR, r)
           }
@@ -194,7 +228,6 @@ export const useMachineStore = create<MachineState>((set) => ({
       let rpm = state.spindleSpeed
       if (state.machineType === 'lathe' && state.spindleMode === 'G96' && state.spindleSpeed > 0) {
         const currentDia = Math.max(0.05, Math.abs(pos.x))
-        // G21 (mm): RPM = (1000 * Vc) / (PI * D) | G20 (cale, SFM): RPM = (12 * Vc) / (PI * D)
         const factor = state.unitMode === 'G21' ? 1000 : 12
         rpm = Math.min(
           state.maxSpindleSpeed,
@@ -240,16 +273,58 @@ export const useMachineStore = create<MachineState>((set) => ({
       isPlaying: false,
     }),
 
-  playProgram: () => set({ isPlaying: true }),
+  playProgram: () =>
+    set((state) => {
+      // Jeśli program skończył się na M30 i klikamy ponownie CYCLE START, startujemy od kroku 0
+      if (state.currentStepIndex >= state.compiledSteps.length - 1 && state.compiledSteps.length > 0) {
+        const first = state.compiledSteps[0]
+        return {
+          isPlaying: true,
+          currentStepIndex: 0,
+          currentLineIndex: first.lineNumber,
+          motionMode: first.motionMode,
+          unitMode: first.unitMode,
+          targetPosition: first.target,
+          arcParams: first.arc || {},
+          feedRate: first.feedRate,
+          spindleSpeed: first.spindleSpeed,
+          spindleMode: first.spindleMode,
+          maxSpindleSpeed: first.maxSpindleSpeed,
+          feedMode: first.feedMode,
+          activeTool: first.toolNumber,
+          coolant: first.coolant,
+        }
+      }
+      return { isPlaying: true }
+    }),
+
   pauseProgram: () => set({ isPlaying: false }),
 
   advanceStep: () =>
     set((state) => {
       const nextStepIdx = state.currentStepIndex + 1
       if (nextStepIdx >= state.compiledSteps.length) {
-        return { isPlaying: false, currentStepIndex: nextStepIdx }
+        // Koniec programu (M30): przewijamy wskaźnik linii na początek (linia 0) i zatrzymujemy wrzeciono!
+        return {
+          isPlaying: false,
+          currentStepIndex: 0,
+          currentLineIndex: 0,
+          spindleSpeed: 0,
+          actualRpm: 0,
+          coolant: false,
+        }
       }
       const nextStep = state.compiledSteps[nextStepIdx]
+      if (nextStep.isProgramEnd) {
+        return {
+          isPlaying: false,
+          currentStepIndex: 0,
+          currentLineIndex: 0,
+          spindleSpeed: 0,
+          actualRpm: 0,
+          coolant: false,
+        }
+      }
       return {
         currentStepIndex: nextStepIdx,
         currentLineIndex: nextStep.lineNumber,
@@ -288,6 +363,7 @@ export const useMachineStore = create<MachineState>((set) => ({
       feedRate: 0.2,
       spindleSpeed: 0,
       actualRpm: 0,
+      activeTool: 1,
       coolant: false,
       latheProfile: Array(Z_STEPS).fill(state.stockDiameter / 2),
       innerProfile: Array(Z_STEPS).fill(0),

@@ -118,8 +118,28 @@ export const compileGCodeProgram = (lines: string[]): ExecutionStep[] => {
 
     if (words.M.includes(8)) coolant = true
     if (words.M.includes(9)) coolant = false
-    if (words.M.includes(5) || words.M.includes(30)) spindleSpeed = 0
 
+    if (words.M.includes(5) || words.M.includes(30)) spindleSpeed = 0
+    if (words.M.includes(30) || words.M.includes(2)) {
+      spindleSpeed = 0
+      coolant = false
+      steps.push({
+        lineNumber: index,
+        rawLine: lines[index],
+        motionMode: 'G0',
+        unitMode,
+        target: { ...pos },
+        feedRate,
+        spindleSpeed: 0,
+        spindleMode,
+        maxSpindleSpeed,
+        feedMode,
+        toolNumber,
+        coolant: false,
+        isProgramEnd: true,
+      })
+      continue
+    }
     if (words.T !== undefined) {
       toolNumber = words.T >= 100 ? Math.floor(words.T / 100) : words.T
     }
